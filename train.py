@@ -12,8 +12,8 @@ import torchvision.datasets as dset
 import torchvision.transforms as transforms
 import torchvision.utils as vutils
 from torch.autograd import Variable
+from model1 import _netlocalD,_netG
 
-from model import _netlocalD,_netG
 import utils
 
 
@@ -47,7 +47,7 @@ parser.add_argument('--wtlD',type=float,default=0.001,help='0 means do not use e
 
 opt = parser.parse_args()
 print(opt)
-
+# make dirs for train file and model
 try:
     os.makedirs("result/train/cropped")
     os.makedirs("result/train/real")
@@ -55,7 +55,7 @@ try:
     os.makedirs("model")
 except OSError:
     pass
-
+# set random seed
 if opt.manualSeed is None:
     opt.manualSeed = random.randint(1, 10000)
 print("Random Seed: ", opt.manualSeed)
@@ -63,12 +63,13 @@ random.seed(opt.manualSeed)
 torch.manual_seed(opt.manualSeed)
 if opt.cuda:
     torch.cuda.manual_seed_all(opt.manualSeed)
-
+# https://discuss.pytorch.org/t/what-does-torch-backends-cudnn-benchmark-do/5936
+# This flag allows you to enable the inbuilt cudnn auto-tuner to find the best algorithm to use for your hardware.
 cudnn.benchmark = True
-
+# enable cuda
 if torch.cuda.is_available() and not opt.cuda:
     print("WARNING: You have a CUDA device, so you should probably run with --cuda")
-
+# load dataset
 if opt.dataset in ['imagenet', 'folder', 'lfw']:
     # folder dataset
     dataset = dset.ImageFolder(root=opt.dataroot,
@@ -94,6 +95,7 @@ elif opt.dataset == 'cifar10':
                                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
                            ])
     )
+# here. 
 elif opt.dataset == 'streetview':
     transform = transforms.Compose([transforms.Scale(opt.imageSize),
                                     transforms.CenterCrop(opt.imageSize),
@@ -134,39 +136,33 @@ if opt.netG != '':
 print(netG)
 
 
-netD = _netlocalD(opt)
+netD = _netlocalD()
 netD.apply(weights_init)
 if opt.netD != '':
     netD.load_state_dict(torch.load(opt.netD,map_location=lambda storage, location: storage)['state_dict'])
     resume_epoch = torch.load(opt.netD)['epoch']
 print(netD)
 
-criterion = nn.BCELoss()
+criterion = nn.BCEWithLogitsLoss()
 criterionMSE = nn.MSELoss()
 
 input_real = torch.FloatTensor(opt.batchSize, 3, opt.imageSize, opt.imageSize)
-input_cropped = torch.FloatTensor(opt.batchSize, 3, opt.imageSize, opt.imageSize)
+input_withnoise = torch.FloatTensor(opt.batchSize, 3, opt.imageSize, opt.imageSize)
 label = torch.FloatTensor(opt.batchSize)
 real_label = 1
 fake_label = 0
-
-real_center = torch.FloatTensor(opt.batchSize, 3, opt.imageSize/2, opt.imageSize/2)
 
 if opt.cuda:
     netD.cuda()
     netG.cuda()
     criterion.cuda()
     criterionMSE.cuda()
-    input_real, input_cropped,label = input_real.cuda(),input_cropped.cuda(), label.cuda()
-    real_center = real_center.cuda()
+    input_real, input_withnoise,label = input_real.cuda(),input_withnoise.cuda(), label.cuda()
 
 
 input_real = Variable(input_real)
-input_cropped = Variable(input_cropped)
+input_withnoise = Variable(input_withnoise)
 label = Variable(label)
-
-
-real_center = Variable(real_center)
 
 # setup optimizer
 optimizerD = optim.Adam(netD.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
@@ -175,20 +171,18 @@ optimizerG = optim.Adam(netG.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
 for epoch in range(resume_epoch,opt.niter):
     for i, data in enumerate(dataloader, 0):
         real_cpu, _ = data
-        real_center_cpu = real_cpu[:,:,int(opt.imageSize/4):int(opt.imageSize/4)+int(opt.imageSize/2),int(opt.imageSize/4):int(opt.imageSize/4)+int(opt.imageSize/2)]
         batch_size = real_cpu.size(0)
         input_real.data.resize_(real_cpu.size()).copy_(real_cpu)
-        input_cropped.data.resize_(real_cpu.size()).copy_(real_cpu)
-        real_center.data.resize_(real_center_cpu.size()).copy_(real_center_cpu)
-        input_cropped.data[:,0,int(opt.imageSize/4+opt.overlapPred):int(opt.imageSize/4+opt.imageSize/2-opt.overlapPred),int(opt.imageSize/4+opt.overlapPred):int(opt.imageSize/4+opt.imageSize/2-opt.overlapPred)] = 2*117.0/255.0 - 1.0
-        input_cropped.data[:,1,int(opt.imageSize/4+opt.overlapPred):int(opt.imageSize/4+opt.imageSize/2-opt.overlapPred),int(opt.imageSize/4+opt.overlapPred):int(opt.imageSize/4+opt.imageSize/2-opt.overlapPred)] = 2*104.0/255.0 - 1.0
-        input_cropped.data[:,2,int(opt.imageSize/4+opt.overlapPred):int(opt.imageSize/4+opt.imageSize/2-opt.overlapPred),int(opt.imageSize/4+opt.overlapPred):int(opt.imageSize/4+opt.imageSize/2-opt.overlapPred)] = 2*123.0/255.0 - 1.0
+        input_withnoise.data.resize_(real_cpu.size()).copy_(real_cpu)
+        input_withnoise.data[:,0,int(opt.imageSize/4+opt.overlapPred):int(opt.imageSize/4+opt.imageSize/2-opt.overlapPred),int(opt.imageSize/4+opt.overlapPred):int(opt.imageSize/4+opt.imageSize/2-opt.overlapPred)] = 2*117.0/255.0 - 1.0
+        input_withnoise.data[:,1,int(opt.imageSize/4+opt.overlapPred):int(opt.imageSize/4+opt.imageSize/2-opt.overlapPred),int(opt.imageSize/4+opt.overlapPred):int(opt.imageSize/4+opt.imageSize/2-opt.overlapPred)] = 2*104.0/255.0 - 1.0
+        input_withnoise.data[:,2,int(opt.imageSize/4+opt.overlapPred):int(opt.imageSize/4+opt.imageSize/2-opt.overlapPred),int(opt.imageSize/4+opt.overlapPred):int(opt.imageSize/4+opt.imageSize/2-opt.overlapPred)] = 2*123.0/255.0 - 1.0
+
 
         # train with real
         netD.zero_grad()
         label.data.resize_(batch_size).fill_(real_label)
-
-        output = netD(real_center)
+        output = netD(input_real)
         errD_real = criterion(output, label)
         errD_real.backward()
         D_x = output.data.mean()
@@ -196,9 +190,10 @@ for epoch in range(resume_epoch,opt.niter):
         # train with fake
         # noise.data.resize_(batch_size, nz, 1, 1)
         # noise.data.normal_(0, 1)
-        fake = netG(input_cropped)
+        fake = netG(input_withnoise)
         label.data.fill_(fake_label)
         output = netD(fake.detach())
+
         errD_fake = criterion(output, label)
         errD_fake.backward()
         D_G_z1 = output.data.mean()
@@ -212,17 +207,19 @@ for epoch in range(resume_epoch,opt.niter):
         netG.zero_grad()
         label.data.fill_(real_label)  # fake labels are real for generator cost
         output = netD(fake)
+        
         errG_D = criterion(output, label)
+
         # errG_D.backward(retain_variables=True)
 
-        # errG_l2 = criterionMSE(fake,real_center)
-        wtl2Matrix = real_center.clone()
-        wtl2Matrix.data.fill_(wtl2*overlapL2Weight)
-        wtl2Matrix.data[:,:,int(opt.overlapPred):int(opt.imageSize/2 - opt.overlapPred),int(opt.overlapPred):int(opt.imageSize/2 - opt.overlapPred)] = wtl2
+        errG_l2 = criterionMSE(fake,input_real)
+        # wtl2Matrix = real_center.clone()
+        # wtl2Matrix.data.fill_(wtl2*overlapL2Weight)
+        # wtl2Matrix.data[:,:,int(opt.overlapPred):int(opt.imageSize/2 - opt.overlapPred),int(opt.overlapPred):int(opt.imageSize/2 - opt.overlapPred)] = wtl2
         
-        errG_l2 = (fake-real_center).pow(2)
-        errG_l2 = errG_l2 * wtl2Matrix
-        errG_l2 = errG_l2.mean()
+        # errG_l2 = (fake-real_center).pow(2)
+        # errG_l2 = errG_l2 * wtl2Matrix
+        # errG_l2 = errG_l2.mean()
 
         errG = (1-wtl2) * errG_D + wtl2 * errG_l2
 
@@ -237,10 +234,9 @@ for epoch in range(resume_epoch,opt.niter):
         if i % 100 == 0:
             vutils.save_image(real_cpu,
                     'result/train/real/real_samples_epoch_%03d.png' % (epoch))
-            vutils.save_image(input_cropped.data,
+            vutils.save_image(input_withnoise.data,
                     'result/train/cropped/cropped_samples_epoch_%03d.png' % (epoch))
-            recon_image = input_cropped.clone()
-            recon_image.data[:,:,int(opt.imageSize/4):int(opt.imageSize/4+opt.imageSize/2),int(opt.imageSize/4):int(opt.imageSize/4+opt.imageSize/2)] = fake.data
+            recon_image = fake.clone()
             vutils.save_image(recon_image.data,
                     'result/train/recon/recon_center_samples_epoch_%03d.png' % (epoch))
 
